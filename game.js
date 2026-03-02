@@ -1,4 +1,4 @@
-const TILE = 32;
+const TILE = 48;
 const TILE_EMPTY = 0;
 const TILE_SOLID = 1;
 const TILE_LADDER = 2;
@@ -7,6 +7,7 @@ const TILE_GOLD = 4;
 const STEP_MS = 120;
 const HOLE_TIMER = 33;
 const ENEMY_STEP_MS = 160; // プレイヤー(120ms)よりやや遅い
+const ENEMY_COUNT = 2;    // この数値を変えると敵の数が変わる
 
 // マップ定義
 // 0: 空, 1: レンガ, 2: はしご, 3: 鉄骨, 4: 金塊
@@ -69,8 +70,12 @@ const ctx = canvas.getContext('2d');
 const INITIAL_PLAYER = { x: 1, y: 12 };
 const player = { x: INITIAL_PLAYER.x, y: INITIAL_PLAYER.y };
 
-const INITIAL_ENEMY = { x: 18, y: 12 };
-let enemy = { x: INITIAL_ENEMY.x, y: INITIAL_ENEMY.y };
+const ENEMY_STARTS = [
+  { x: 18, y: 12 },
+  { x: 15, y:  3 },
+  { x:  3, y:  5 },
+];
+let enemies = ENEMY_STARTS.slice(0, ENEMY_COUNT).map(s => ({ x: s.x, y: s.y, alive: true }));
 
 function tileAt(col, row) {
   if (row < 0 || row >= ROWS || col < 0 || col >= COLS) return TILE_SOLID;
@@ -85,7 +90,6 @@ let totalGold = countGold(INITIAL_MAP);
 let collectedGold = 0;
 let cleared = false;
 let holes = []; // { col, row, remaining }
-let enemyAlive = true;
 let gameOver = false;
 let enemyAccMs = 0;
 
@@ -101,9 +105,7 @@ function resetGame() {
   collectedGold = 0;
   cleared = false;
   holes = [];
-  enemy.x = INITIAL_ENEMY.x;
-  enemy.y = INITIAL_ENEMY.y;
-  enemyAlive = true;
+  enemies = ENEMY_STARTS.slice(0, ENEMY_COUNT).map(s => ({ x: s.x, y: s.y, alive: true }));
   gameOver = false;
   enemyAccMs = 0;
   accumulatedMs = 0;
@@ -126,31 +128,59 @@ window.addEventListener('keydown', e => {
 window.addEventListener('keyup', e => {
   keys[e.key] = false;
 });
-function updateEnemy() {
-  if (!enemyAlive) return;
+function findNearestLadder(col, row) {
+  for (let d = 1; d < COLS; d++) {
+    if (col - d >= 0 && isLadder(col - d, row)) return col - d;
+    if (col + d < COLS && isLadder(col + d, row)) return col + d;
+  }
+  return -1;
+}
 
-  const inHole = holes.some(h => h.col === enemy.x && h.row === enemy.y);
+function updateEnemy(e) {
+  if (!e.alive) return;
+
+  const inHole = holes.some(h => h.col === e.x && h.row === e.y);
   if (inHole) return;
 
-  const onGround = isSolid(enemy.x, enemy.y + 1);
-  const onLadder = isLadder(enemy.x, enemy.y);
-  const onBar    = isBar(enemy.x, enemy.y);
+  const onGround = isSolid(e.x, e.y + 1);
+  const onLadder = isLadder(e.x, e.y);
+  const onBar    = isBar(e.x, e.y);
   const falling  = !onGround && !onLadder && !onBar;
-  if (falling) { enemy.y++; return; }
+  if (falling) { e.y++; return; }
 
-  const dx = player.x - enemy.x;
-  const dy = player.y - enemy.y;
+  const dx = player.x - e.x;
+  const dy = player.y - e.y;
 
+  // 鉄骨上: 横移動のみ
+  if (onBar) {
+    if (dx !== 0) {
+      const dir = dx > 0 ? 1 : -1;
+      if (!isSolid(e.x + dir, e.y)) { e.x += dir; }
+    }
+    return;
+  }
+
+  // はしごで縦移動（高さを合わせる）
   if (onLadder && dy !== 0) {
     const dir = dy > 0 ? 1 : -1;
-    if (!isSolid(enemy.x, enemy.y + dir)) { enemy.y += dir; return; }
+    if (!isSolid(e.x, e.y + dir)) { e.y += dir; return; }
   }
-  if (dy < 0 && isLadder(enemy.x, enemy.y - 1) && !isSolid(enemy.x, enemy.y - 1)) {
-    enemy.y--; return;
+  // 上のはしごに入る
+  if (dy < 0 && isLadder(e.x, e.y - 1) && !isSolid(e.x, e.y - 1)) {
+    e.y--; return;
   }
+  // 横移動
   if (dx !== 0) {
     const dir = dx > 0 ? 1 : -1;
-    if (!isSolid(enemy.x + dir, enemy.y)) { enemy.x += dir; return; }
+    if (!isSolid(e.x + dir, e.y)) { e.x += dir; return; }
+  }
+  // 横に進めず高さが違う場合: 最寄りのはしごを目指す
+  if (dy !== 0) {
+    const ladderCol = findNearestLadder(e.x, e.y);
+    if (ladderCol !== -1) {
+      const dir = ladderCol > e.x ? 1 : -1;
+      if (!isSolid(e.x + dir, e.y)) { e.x += dir; }
+    }
   }
 }
 
@@ -159,7 +189,7 @@ function tryDig(direction) {
   const onBar    = isBar(player.x, player.y);
   const onGround = isSolid(player.x, player.y + 1);
   const falling  = !onGround && !onLadder && !onBar;
-  if (falling) return;
+  if (falling || onBar) return;
 
   const tc = player.x + direction;
   const tr = player.y + 1;
@@ -190,7 +220,7 @@ function updateStep() {
     if (!isSolid(player.x, player.y - 1)) player.y -= 1;
   }
   // 下（はしご）: はしごを下る、または下端で↓を押したら落下
-  if ((keys['ArrowDown'] || keys['s']) && (onLadder || onGround)) {
+  if ((keys['ArrowDown'] || keys['s']) && (onLadder || onGround || onBar)) {
     if (!isSolid(player.x, player.y + 1)) player.y += 1;
   }
   // 左右
@@ -205,8 +235,10 @@ function updateStep() {
   for (let i = holes.length - 1; i >= 0; i--) {
     holes[i].remaining--;
     if (holes[i].remaining <= 0) {
-      if (enemy.x === holes[i].col && enemy.y === holes[i].row) {
-        enemyAlive = false;
+      for (const e of enemies) {
+        if (e.alive && e.x === holes[i].col && e.y === holes[i].row) {
+          e.alive = false;
+        }
       }
       MAP[holes[i].row][holes[i].col] = TILE_SOLID;
       holes.splice(i, 1);
@@ -251,13 +283,16 @@ function draw() {
         ctx.strokeStyle = '#7a3b1e';
         ctx.strokeRect(x, y, TILE, TILE);
       } else if (t === TILE_LADDER) {
+        const lx1 = x + TILE * 0.3;
+        const lx2 = x + TILE * 0.7;
         ctx.strokeStyle = '#f5c518';
         ctx.lineWidth = 3;
-        ctx.beginPath(); ctx.moveTo(x + 10, y); ctx.lineTo(x + 10, y + TILE); ctx.stroke();
-        ctx.beginPath(); ctx.moveTo(x + 22, y); ctx.lineTo(x + 22, y + TILE); ctx.stroke();
-        for (let i = 0; i < 3; i++) {
-          const hy = y + 6 + i * 10;
-          ctx.beginPath(); ctx.moveTo(x + 10, hy); ctx.lineTo(x + 22, hy); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(lx1, y); ctx.lineTo(lx1, y + TILE); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(lx2, y); ctx.lineTo(lx2, y + TILE); ctx.stroke();
+        const numRungs = Math.max(3, Math.floor(TILE / 12));
+        for (let i = 0; i < numRungs; i++) {
+          const hy = y + TILE * (i + 1) / (numRungs + 1);
+          ctx.beginPath(); ctx.moveTo(lx1, hy); ctx.lineTo(lx2, hy); ctx.stroke();
         }
         ctx.lineWidth = 1;
       } else if (t === TILE_BAR) {
@@ -266,7 +301,7 @@ function draw() {
       } else if (t === TILE_GOLD) {
         ctx.fillStyle = '#ffd700';
         ctx.beginPath();
-        ctx.arc(x + TILE / 2, y + TILE / 2, 8, 0, Math.PI * 2);
+        ctx.arc(x + TILE / 2, y + TILE / 2, TILE * 0.25, 0, Math.PI * 2);
         ctx.fill();
         ctx.strokeStyle = '#b8860b';
         ctx.lineWidth = 2;
@@ -306,14 +341,15 @@ function draw() {
   }
 
   // 敵
-  if (enemyAlive) {
-    const ex = enemy.x * TILE;
-    const ey = enemy.y * TILE;
+  for (const e of enemies) {
+    if (!e.alive) continue;
+    const ex = e.x * TILE;
+    const ey = e.y * TILE;
     ctx.fillStyle = '#ff4444';
-    ctx.fillRect(ex + 8, ey + 10, 16, 16);
+    ctx.fillRect(ex + TILE * 0.25, ey + TILE * 0.31, TILE * 0.5, TILE * 0.5);
     ctx.fillStyle = '#ffcccc';
     ctx.beginPath();
-    ctx.arc(ex + 16, ey + 7, 7, 0, Math.PI * 2);
+    ctx.arc(ex + TILE * 0.5, ey + TILE * 0.22, TILE * 0.22, 0, Math.PI * 2);
     ctx.fill();
   }
 
@@ -321,10 +357,10 @@ function draw() {
   const px = player.x * TILE;
   const py = player.y * TILE;
   ctx.fillStyle = '#00bfff';
-  ctx.fillRect(px + 8, py + 10, 16, 16);
+  ctx.fillRect(px + TILE * 0.25, py + TILE * 0.31, TILE * 0.5, TILE * 0.5);
   ctx.fillStyle = '#ffe4b5';
   ctx.beginPath();
-  ctx.arc(px + 16, py + 7, 7, 0, Math.PI * 2);
+  ctx.arc(px + TILE * 0.5, py + TILE * 0.22, TILE * 0.22, 0, Math.PI * 2);
   ctx.fill();
 }
 
@@ -342,8 +378,8 @@ function loop(timestamp) {
 
     enemyAccMs += delta;
     while (enemyAccMs >= ENEMY_STEP_MS) {
-      updateEnemy();
-      if (enemyAlive && enemy.x === player.x && enemy.y === player.y) {
+      for (const e of enemies) updateEnemy(e);
+      if (enemies.some(e => e.alive && e.x === player.x && e.y === player.y)) {
         gameOver = true;
       }
       enemyAccMs -= ENEMY_STEP_MS;
